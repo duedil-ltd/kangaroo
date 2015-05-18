@@ -1,15 +1,15 @@
 /**
  * Copyright 2014 Conductor, Inc.
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
  * the License. You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
  * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations under the License.
- * 
+ *
  */
 
 package com.conductor.kafka.zk;
@@ -19,6 +19,7 @@ import static java.lang.String.format;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 import org.I0Itec.zkclient.ZkClient;
 import org.I0Itec.zkclient.exception.ZkMarshallingError;
@@ -35,19 +36,20 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Ranges;
+import com.google.common.reflect.TypeToken;
+import com.google.gson.Gson;
 
 /**
  * This class wraps some of the Kafka interactions with Zookeeper, namely {@link Broker} and {@link Partition} queries,
  * as well as consumer group offset operations and queries.
- * 
+ *
  * <p/>
  * Thanks to <a href="https://github.com/miniway">Dongmin Yu</a> for providing the inspiration for this code.
- * 
+ *
  * <p/>
  * The original source code can be found <a target="_blank" href="https://github.com/miniway/kafka-hadoop-consumer">on
  * Github</a>.
- * 
+ *
  * @author <a href="mailto:cgreen@conductor.com">Casey Green</a>
  */
 public class ZkUtils implements Closeable {
@@ -65,7 +67,7 @@ public class ZkUtils implements Closeable {
 
     /**
      * Creates a Zookeeper client.
-     * 
+     *
      * @param zkConnectionString
      *            the connection string for Zookeeper, e.g. {@code zk-1.com:2181,zk-2.com:2181}.
      * @param zkRoot
@@ -82,7 +84,7 @@ public class ZkUtils implements Closeable {
 
     /**
      * Creates a Zookeeper client based on the settings in {@link Configuration}.
-     * 
+     *
      * @param config
      *            config with the Zookeeper settings in it.
      * @see KafkaInputFormat#getZkConnect(org.apache.hadoop.conf.Configuration)
@@ -99,7 +101,7 @@ public class ZkUtils implements Closeable {
 
     /**
      * Closes the Zookeeper client
-     * 
+     *
      * @throws IOException
      */
     @Override
@@ -109,7 +111,7 @@ public class ZkUtils implements Closeable {
 
     /**
      * Gets the {@link Broker} by ID if it exists, {@code null} otherwise.
-     * 
+     *
      * @param id
      *            the broker id.
      * @return a {@link Broker} if it exists, {@code null} otherwise.
@@ -117,17 +119,18 @@ public class ZkUtils implements Closeable {
     public Broker getBroker(final Integer id) {
         String data = client.readData(getBrokerIdPath(id), true);
         if (!Strings.isNullOrEmpty(data)) {
-            LOG.info("Broker " + id + " " + data);
-            // broker_ip_address-latest_offset:broker_ip_address:broker_port
-            final String[] brokerInfoTokens = data.split(":");
-            return new Broker(brokerInfoTokens[1], Integer.parseInt(brokerInfoTokens[2]), id);
+            Gson gson = new Gson();
+            Map<String, Object> brokerData = gson.fromJson(data, new TypeToken<Map<String, Object>>(){}.getType());
+
+            LOG.info("Broker " + id + " " + brokerData.get("host") + ":" + ((Double) brokerData.get("port")).intValue());
+            return new Broker((String) brokerData.get("host"), ((Double) brokerData.get("port")).intValue(), id);
         }
         return null;
     }
 
     /**
      * Gets all of the {@link Broker}s in this Kafka cluster.
-     * 
+     *
      * @return all of the {@link Broker}s in this Kafka cluster.
      */
     public List<Broker> getBrokers() {
@@ -141,44 +144,31 @@ public class ZkUtils implements Closeable {
 
     /**
      * A {@link List} of all the {@link Partition} for a given {@code topic}.
-     * 
+     *
      * @param topic
      *            the topic.
      * @return all the {@link Partition} for a given {@code topic}.
      */
     public List<Partition> getPartitions(final String topic) {
         final List<Partition> partitions = Lists.newArrayList();
-        final List<String> brokersHostingTopic = getChildrenParentMayNotExist(getTopicBrokerIdSubPath(topic));
-        for (final String brokerId : brokersHostingTopic) {
-            final int bId = Integer.parseInt(brokerId);
-            final String parts = client.readData(getTopicBrokerIdPath(topic, bId));
-            final Broker brokerInfo = getBroker(bId);
-            for (int i = 0; i < Integer.valueOf(parts); i++) {
-                partitions.add(new Partition(topic, i, brokerInfo));
+        String data = client.readData(getTopicBrokerIdSubPath(topic));
+
+        Gson gson = new Gson();
+        Map<String, Object> topicData = gson.fromJson(data, new TypeToken<Map<String, Object>>(){}.getType());
+
+        for(Map.Entry<String, List<Double>> partition : ((Map<String, List<Double>>) topicData.get("partitions")).entrySet()) {
+            String partitionId = partition.getKey();
+            for (Double brokerId : partition.getValue()) {
+                partitions.add(new Partition(topic, Integer.parseInt(partitionId), getBroker(brokerId.intValue())));
             }
         }
+
         return partitions;
     }
 
     /**
-     * Checks whether the provided partition exists on the {@link Broker}.
-     * 
-     * @param broker
-     *            the broker.
-     * @param topic
-     *            the topic.
-     * @param partId
-     *            the partition id.
-     * @return true if this partition exists on the {@link Broker}, false otherwise.
-     */
-    public boolean partitionExists(final Broker broker, final String topic, final int partId) {
-        final String parts = client.readData(getTopicBrokerIdPath(topic, broker.getId()), true);
-        return !Strings.isNullOrEmpty(parts) && Ranges.closedOpen(0, Integer.parseInt(parts)).contains(partId);
-    }
-
-    /**
      * Gets the last commit made by the {@code group} on the {@code topic-partition}.
-     * 
+     *
      * @param group
      *            the consumer group.
      * @param partition
@@ -201,7 +191,7 @@ public class ZkUtils implements Closeable {
      * If {@code temp == true}, this will "temporarily" set the offset, in which case the user must call
      * {@link #commit(String, String)}. This is useful if a user wants to temporarily commit an offset for a topic
      * partition, and then commit it once <em>all</em> topic partitions have completed.
-     * 
+     *
      * @param group
      *            the consumer group.
      * @param partition
@@ -224,7 +214,7 @@ public class ZkUtils implements Closeable {
 
     /**
      * Commits any temporary offsets of the {@code group} for a given {@code topic}.
-     * 
+     *
      * @param group
      *            the consumer group.
      * @param topic
@@ -266,12 +256,12 @@ public class ZkUtils implements Closeable {
     @VisibleForTesting
     String getOffsetsPath(String group, Partition partition) {
         return format("%s/consumers/%s/offsets/%s/%s", zkRoot, group, partition.getTopic(),
-                partition.getBrokerPartition());
+                partition.getPartId());
     }
 
     @VisibleForTesting
     String getTempOffsetsPath(String group, Partition partition) {
-        return format("%s/%s", getTempOffsetsSubPath(group, partition.getTopic()), partition.getBrokerPartition());
+        return format("%s/%s", getTempOffsetsSubPath(group, partition.getTopic()), partition.getPartId());
     }
 
     @VisibleForTesting
@@ -292,11 +282,6 @@ public class ZkUtils implements Closeable {
     @VisibleForTesting
     String getTopicBrokerIdSubPath(final String topic) {
         return format("%s/brokers/topics/%s", zkRoot, topic);
-    }
-
-    @VisibleForTesting
-    String getTopicBrokerIdPath(final String topic, final int brokerId) {
-        return format("%s/%d", getTopicBrokerIdSubPath(topic), brokerId);
     }
 
     @VisibleForTesting
