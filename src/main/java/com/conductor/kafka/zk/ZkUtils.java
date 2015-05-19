@@ -20,14 +20,13 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 
 import org.I0Itec.zkclient.ZkClient;
 import org.I0Itec.zkclient.exception.ZkMarshallingError;
 import org.I0Itec.zkclient.exception.ZkNoNodeException;
 import org.I0Itec.zkclient.serialize.ZkSerializer;
 import org.apache.hadoop.conf.Configuration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.conductor.kafka.Broker;
 import com.conductor.kafka.Partition;
@@ -55,10 +54,9 @@ import com.google.gson.GsonBuilder;
  */
 public class ZkUtils implements Closeable {
 
-    private static Logger LOG = LoggerFactory.getLogger(ZkUtils.class);
-
     private final Gson gson = new GsonBuilder()
     		.registerTypeAdapter(Broker.class, new BrokerDeserializer())
+    		.registerTypeAdapter(BrokerPartitionInfo.class, new BrokerPartitionInfoDeserializer())
     		.create();
     private final ZkClient client;
     private final String zkRoot;
@@ -153,14 +151,13 @@ public class ZkUtils implements Closeable {
      */
     public List<Partition> getPartitions(final String topic) {
         final List<Partition> partitions = Lists.newArrayList();
+
         String data = client.readData(getTopicBrokerIdSubPath(topic));
+        BrokerPartitionInfo partInfo = gson.fromJson(data, BrokerPartitionInfo.class);
 
-        Map<String, Object> topicData = gson.fromJson(data, new TypeToken<Map<String, Object>>(){}.getType());
-
-        for(Map.Entry<String, List<Double>> partition : ((Map<String, List<Double>>) topicData.get("partitions")).entrySet()) {
-            String partitionId = partition.getKey();
-            for (Double brokerId : partition.getValue()) {
-                partitions.add(new Partition(topic, Integer.parseInt(partitionId), getBroker(brokerId.intValue())));
+        for(Entry<Integer, List<Integer>> partition : partInfo.getPartitions().entrySet()) {
+        	for (Integer brokerId : partition.getValue()) {
+                partitions.add(new Partition(topic, partition.getKey(), getBroker(brokerId)));
             }
         }
 
