@@ -38,6 +38,7 @@ import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.reflect.TypeToken;
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 
 /**
  * This class wraps some of the Kafka interactions with Zookeeper, namely {@link Broker} and {@link Partition} queries,
@@ -56,6 +57,9 @@ public class ZkUtils implements Closeable {
 
     private static Logger LOG = LoggerFactory.getLogger(ZkUtils.class);
 
+    private final Gson gson = new GsonBuilder()
+    		.registerTypeAdapter(Broker.class, new BrokerDeserializer())
+    		.create();
     private final ZkClient client;
     private final String zkRoot;
 
@@ -119,11 +123,9 @@ public class ZkUtils implements Closeable {
     public Broker getBroker(final Integer id) {
         String data = client.readData(getBrokerIdPath(id), true);
         if (!Strings.isNullOrEmpty(data)) {
-            Gson gson = new Gson();
-            Map<String, Object> brokerData = gson.fromJson(data, new TypeToken<Map<String, Object>>(){}.getType());
-
-            LOG.info("Broker " + id + " " + brokerData.get("host") + ":" + ((Double) brokerData.get("port")).intValue());
-            return new Broker((String) brokerData.get("host"), ((Double) brokerData.get("port")).intValue(), id);
+            Broker broker = gson.fromJson(data, Broker.class);
+            broker.setId(id);
+            return broker;
         }
         return null;
     }
@@ -153,7 +155,6 @@ public class ZkUtils implements Closeable {
         final List<Partition> partitions = Lists.newArrayList();
         String data = client.readData(getTopicBrokerIdSubPath(topic));
 
-        Gson gson = new Gson();
         Map<String, Object> topicData = gson.fromJson(data, new TypeToken<Map<String, Object>>(){}.getType());
 
         for(Map.Entry<String, List<Double>> partition : ((Map<String, List<Double>>) topicData.get("partitions")).entrySet()) {
